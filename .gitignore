@@ -1,0 +1,49 @@
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.so
+*.env
+.env
+.env.*
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# ── Node / Frontend ───────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+frontend/.cache/
+frontend/coverage/
+
+# ── Test artefacts ────────────────────────────────────────────
+# Keep test source files, ignore generated outputs
+*.log
+htmlcov/
+.coverage
+.pytest_cache/
+
+# ── OS / editor ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Scratch / temp test files (not part of the module) ────────
+test_valid.py
+test_bad.py
+test.txt
+HelloWorld.java
+Broken.java
