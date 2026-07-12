@@ -1,0 +1,2 @@
+This is a plain text note for the unsupported-file demo.
+It should be rejected by the validator.

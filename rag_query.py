@@ -3,49 +3,45 @@ rag_query.py
 ============
 RAG Query Script
 
-Connects to the local Chroma vector database built by rag_index.py,
-embeds an input query using the same local SentenceTransformer model,
-and retrieves the top-k most semantically similar chunks.
+Supports two retrieval modes:
+1. A local markdown knowledge-base demo for live presentations and tests.
+2. A Chroma-based retrieval flow when a persisted vector database is available.
 
 Usage:
-    # Single query via argument:
-    .venv\Scripts\python.exe rag_query.py --query "How do I prevent SQL injection?"
-
-    # Interactive REPL mode (no --query given):
-    .venv\Scripts\python.exe rag_query.py
-
-    # Show more results, different DB path:
-    .venv\Scripts\python.exe rag_query.py --query "CSRF tokens" --top-k 5 --db-dir ./chroma_db
+    .venv\Scripts\python.exe rag_query.py "How do I prevent SQL injection?"
+    .venv\Scripts\python.exe rag_query.py --query "CSRF tokens" --top-k 5
 """
 
+from __future__ import annotations
+
 import argparse
+import re
 import sys
 import textwrap
 from pathlib import Path
+from typing import Dict, List
 
 # Force UTF-8 output so box-drawing chars don't crash Windows cp1252 terminals
-if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Constants (must match rag_index.py)
-# ─────────────────────────────────────────────────────────────────────────────
-
-DEFAULT_DB_DIR      = r"C:\Users\Aayush\Desktop\Project\chroma_db"
-COLLECTION_NAME     = "codelint_docs"
-EMBED_MODEL         = "all-MiniLM-L6-v2"
-DEFAULT_TOP_K       = 3
-PREVIEW_WORDS       = 80          # words shown per chunk in summary mode
-SEPARATOR       = "-" * 70
+try:
+    import chromadb
+    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+except ImportError:  # pragma: no cover - environment-dependent
+    chromadb = None
+    SentenceTransformerEmbeddingFunction = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Pretty printing helpers
-# ─────────────────────────────────────────────────────────────────────────────
+DEFAULT_DB_DIR = r"C:\Users\Aayush\Desktop\Project\chroma_db"
+COLLECTION_NAME = "codelint_docs"
+EMBED_MODEL = "all-MiniLM-L6-v2"
+DEFAULT_TOP_K = 3
+PREVIEW_WORDS = 80
+SEPARATOR = "-" * 70
+ROOT = Path(__file__).resolve().parent
+KB_PATH = ROOT / "knowledge_base" / "owasp_cheatsheets.md"
+
 
 def _truncate(text: str, max_words: int) -> str:
     words = text.split()
@@ -55,33 +51,30 @@ def _truncate(text: str, max_words: int) -> str:
 
 
 def print_result(rank: int, doc: str, meta: dict, distance: float) -> None:
-    source      = meta.get("source", "unknown")
-    chunk_idx   = meta.get("chunk_index", "?")
-    total       = meta.get("total_chunks", "?")
-    word_count  = meta.get("word_count", "?")
-    # Cosine distance: 0 = identical, 1 = orthogonal  →  similarity = 1 - distance
-    similarity  = max(0.0, 1.0 - distance)
+    source = meta.get("source", "unknown")
+    chunk_idx = meta.get("chunk_index", "?")
+    total = meta.get("total_chunks", "?")
+    word_count = meta.get("word_count", "?")
+    similarity = max(0.0, 1.0 - distance)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  Match #{rank}  |  Similarity: {similarity:.1%}  |  Distance: {distance:.4f}")
     print(f"  Source : {source}  (chunk {chunk_idx + 1}/{total}, {word_count} words)")
     print(SEPARATOR)
 
-    # Word-wrap the chunk preview at 80 chars
     preview = _truncate(doc, PREVIEW_WORDS)
     wrapped = textwrap.fill(preview, width=78, initial_indent="  ", subsequent_indent="  ")
     print(wrapped)
 
 
 def print_full_result(rank: int, doc: str, meta: dict, distance: float) -> None:
-    """Print the full chunk text (used with --full flag)."""
-    source      = meta.get("source", "unknown")
-    chunk_idx   = meta.get("chunk_index", "?")
-    total       = meta.get("total_chunks", "?")
-    word_count  = meta.get("word_count", "?")
-    similarity  = max(0.0, 1.0 - distance)
+    source = meta.get("source", "unknown")
+    chunk_idx = meta.get("chunk_index", "?")
+    total = meta.get("total_chunks", "?")
+    word_count = meta.get("word_count", "?")
+    similarity = max(0.0, 1.0 - distance)
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  Match #{rank}  |  Similarity: {similarity:.1%}  |  Source: {source}")
     print(f"  Chunk {chunk_idx + 1}/{total}  ({word_count} words)")
     print(SEPARATOR)
@@ -89,38 +82,29 @@ def print_full_result(rank: int, doc: str, meta: dict, distance: float) -> None:
     print(wrapped)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Query engine
-# ─────────────────────────────────────────────────────────────────────────────
-
-def load_collection(db_dir: str) -> chromadb.Collection:
-    """Load the persisted Chroma collection (raises if it doesn't exist)."""
+def load_collection(db_dir: str):
+    if chromadb is None or SentenceTransformerEmbeddingFunction is None:
+        raise ImportError("chromadb is not installed")
     if not Path(db_dir).exists():
         raise FileNotFoundError(
             f"Chroma DB not found at: {db_dir}\n"
-            "Run the indexer first:\n"
-            r"  .venv\Scripts\python.exe rag_index.py"
+            "Run the indexer first or use the local markdown knowledge base fallback."
         )
 
-    embed_fn   = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
-    client     = chromadb.PersistentClient(path=db_dir)
-    collection = client.get_collection(
-        name=COLLECTION_NAME,
-        embedding_function=embed_fn,
-    )
-    return collection
+    embed_fn = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
+    client = chromadb.PersistentClient(path=db_dir)
+    return client.get_collection(name=COLLECTION_NAME, embedding_function=embed_fn)
 
 
 def retrieve_context(query: str, top_k: int = 3, db_dir: str = DEFAULT_DB_DIR) -> list[dict]:
-    """
-    Programmatic interface to retrieve context for a given query.
-    Returns a list of matches, each a dict with text, metadata, and similarity.
-    """
     if not query.strip():
         return []
-        
-    collection = load_collection(db_dir)
-    
+
+    try:
+        collection = load_collection(db_dir)
+    except (FileNotFoundError, ImportError):
+        return query_knowledge_base(query, top_k=top_k)
+
     if collection.count() == 0:
         return []
 
@@ -130,29 +114,22 @@ def retrieve_context(query: str, top_k: int = 3, db_dir: str = DEFAULT_DB_DIR) -
         include=["documents", "metadatas", "distances"],
     )
 
-    docs      = results["documents"][0]
-    metas     = results["metadatas"][0]
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
     distances = results["distances"][0]
 
-    matches = []
-    for doc, meta, dist in zip(docs, metas, distances):
-        matches.append({
+    return [
+        {
             "text": doc,
             "meta": meta,
             "similarity": max(0.0, 1.0 - dist),
-            "distance": dist
-        })
-    
-    return matches
+            "distance": dist,
+        }
+        for doc, meta, dist in zip(docs, metas, distances)
+    ]
 
 
-def run_query(
-    collection: chromadb.Collection,
-    query: str,
-    top_k: int,
-    full: bool,
-) -> None:
-    """Embed the query and display top-k results."""
+def run_query(collection, query: str, top_k: int, full: bool) -> None:
     if not query.strip():
         print("  (empty query — skipping)")
         return
@@ -163,8 +140,8 @@ def run_query(
         include=["documents", "metadatas", "distances"],
     )
 
-    docs      = results["documents"][0]
-    metas     = results["metadatas"][0]
+    docs = results["documents"][0]
+    metas = results["metadatas"][0]
     distances = results["distances"][0]
 
     if not docs:
@@ -178,55 +155,104 @@ def run_query(
     for rank, (doc, meta, dist) in enumerate(zip(docs, metas, distances), start=1):
         printer(rank, doc, meta, dist)
 
-    print(f"\n{'='*70}\n")
+    print(f"\n{'=' * 70}\n")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CLI / REPL
-# ─────────────────────────────────────────────────────────────────────────────
+def load_chunks(path: Path) -> List[Dict[str, str]]:
+    text = path.read_text(encoding="utf-8")
+    sections = re.split(r"\n## ", text)
+    chunks: List[Dict[str, str]] = []
+    for section in sections:
+        if not section.strip():
+            continue
+        lines = [line.strip() for line in section.splitlines() if line.strip()]
+        if not lines:
+            continue
+        title = lines[0].replace("#", "").strip()
+        body = " ".join(lines[1:])
+        if not body:
+            continue
+        source_match = re.search(r"Source:\s*(https?://\S+)", section)
+        source = source_match.group(1) if source_match else "local-knowledge-base"
+        chunks.append({"title": title, "content": body, "source": source})
+    return chunks
+
+
+def score_chunk(query: str, chunk: Dict[str, str]) -> float:
+    query_terms = set(re.findall(r"[a-z0-9]+", query.lower()))
+    if not query_terms:
+        return 0.0
+    text = f"{chunk['title']} {chunk['content']}".lower()
+    matches = sum(1 for term in query_terms if term in text)
+    return matches / max(len(query_terms), 1)
+
+
+def query_knowledge_base(query: str, top_k: int = 3) -> List[Dict[str, str]]:
+    chunks = load_chunks(KB_PATH)
+    scored = []
+    for chunk in chunks:
+        score = score_chunk(query, chunk)
+        if score > 0:
+            scored.append({**chunk, "score": round(score, 3)})
+    scored.sort(key=lambda item: item["score"], reverse=True)
+    return scored[:top_k]
+
+
+def print_fallback_results(query: str, results: List[Dict[str, str]]) -> None:
+    print(f"\nQuery: {query}\n")
+    if not results:
+        print("No matching chunks found.")
+        return
+
+    for idx, result in enumerate(results, 1):
+        print(f"{idx}. {result['title']}")
+        print(f"   Score: {result['score']}")
+        print(f"   Source: {result['source']}")
+        print(f"   Chunk: {result['content']}")
+        print()
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="RAG Query Script")
-    p.add_argument("--query",  "-q", default=None,
-                   help="Query string (omit for interactive REPL mode)")
-    p.add_argument("--db-dir", default=DEFAULT_DB_DIR,
-                   help="Path to the persisted Chroma DB directory")
-    p.add_argument("--top-k",  "-k", type=int, default=DEFAULT_TOP_K,
-                   help=f"Number of results to return (default: {DEFAULT_TOP_K})")
-    p.add_argument("--full",   action="store_true",
-                   help="Print the full chunk text instead of a preview")
+    p.add_argument("query", nargs="?", default=None, help="Query string (omit for interactive REPL mode)")
+    p.add_argument("--query", "-q", dest="query_flag", default=None, help="Query string")
+    p.add_argument("--db-dir", default=DEFAULT_DB_DIR, help="Path to the persisted Chroma DB directory")
+    p.add_argument("--top-k", "-k", type=int, default=DEFAULT_TOP_K, help=f"Number of results to return (default: {DEFAULT_TOP_K})")
+    p.add_argument("--full", action="store_true", help="Print the full chunk text instead of a preview")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    query = args.query_flag or args.query
 
-    print("Loading Chroma collection…")
-    try:
-        collection = load_collection(args.db_dir)
-    except (FileNotFoundError, Exception) as exc:
-        print(f"Error: {exc}")
-        raise SystemExit(1)
-
-    total = collection.count()
-    print(f"Collection '{COLLECTION_NAME}' loaded — {total} chunks indexed.\n")
-
-    if args.query:
-        # Single-shot mode
-        run_query(collection, args.query, args.top_k, args.full)
+    if query:
+        try:
+            collection = load_collection(args.db_dir)
+        except (FileNotFoundError, ImportError):
+            print("Using local markdown knowledge-base fallback.\n")
+            results = query_knowledge_base(query, top_k=args.top_k)
+            print_fallback_results(query, results)
+        else:
+            run_query(collection, query, args.top_k, args.full)
     else:
-        # Interactive REPL
         print("Interactive RAG Query  (type 'quit' or Ctrl-C to exit)")
         print(f"Returning top-{args.top_k} results per query.\n")
         try:
             while True:
                 try:
-                    query = input("Query> ").strip()
+                    current_query = input("Query> ").strip()
                 except EOFError:
                     break
-                if query.lower() in {"quit", "exit", "q"}:
+                if current_query.lower() in {"quit", "exit", "q"}:
                     break
-                run_query(collection, query, args.top_k, args.full)
+                try:
+                    collection = load_collection(args.db_dir)
+                except (FileNotFoundError, ImportError):
+                    results = query_knowledge_base(current_query, top_k=args.top_k)
+                    print_fallback_results(current_query, results)
+                else:
+                    run_query(collection, current_query, args.top_k, args.full)
         except KeyboardInterrupt:
             pass
         print("\nGoodbye.")
