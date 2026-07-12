@@ -1,4 +1,4 @@
-# CodeLint — Code Submission & Validation Module
+# CodeLint
 
 A full-stack code validation tool built with **FastAPI** (backend) and **React + Vite** (frontend).
 
