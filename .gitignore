@@ -47,3 +47,7 @@ test_bad.py
 test.txt
 HelloWorld.java
 Broken.java
+
+# -- Chroma DB -------------------------------------------------
+chroma_db/
+
